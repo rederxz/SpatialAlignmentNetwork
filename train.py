@@ -74,6 +74,7 @@ def main(args):
     cfg.weight_gan = args.gan_weight
     cfg.weight_gan_sim = args.gan_sim_weight
     cfg.weight_sim = args.sim_weight
+    cfg.weight_pre_sim = args.pre_sim_weight
     cfg.use_amp = args.use_amp
     #cfg.sim = args.sim_weight
     #cfg.mask_losses = {}
@@ -158,8 +159,8 @@ def main(args):
     loader_val = torch.utils.data.DataLoader( \
             slices_val, batch_size=args.batch_size, shuffle=False, \
             num_workers=args.num_workers, pin_memory=True, drop_last=True)
-    len_vis = 16
-    col_vis = 4
+    len_vis = 4
+    col_vis = 1
     seed = 19950102+666+233
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -219,7 +220,7 @@ def main(args):
             #t4 = time.time()
 
             time_start = time.time()
-            if iter_cnt % 50 == 0:
+            if iter_cnt % 50 == 0:  # train log every 50 iters
                 last_loss = iter_cnt
                 vis = net.get_vis('scalars')
                 for name, val in vis['scalars'].items():
@@ -232,7 +233,7 @@ def main(args):
                             **val)
                 del vis, name, val
             if (iter_cnt % 1000 == 0) or \
-                    ((iter_cnt < 10000) and (iter_cnt % 100 == 0)):
+                    ((iter_cnt < 10000) and (iter_cnt % 100 == 0)):  # visualization
                 last_disp = iter_cnt
                 net.eval()
                 # visualize image
@@ -247,7 +248,7 @@ def main(args):
                         range=(0, 1), pad_value=0.5)
                 del vis, name, val
             if (iter_cnt % 5000 == 0) or \
-                    ((iter_cnt < 10000) and (iter_cnt % 1000 == 0)):
+                    ((iter_cnt < 10000) and (iter_cnt % 1000 == 0)):  # save ckpt every some iters
                 # 3000 should be dividable by 250
                 last_ckpt = iter_cnt
                 net.save(args.logdir+'/ckpt/ckpt_%010d.pt'%iter_cnt)
@@ -277,7 +278,7 @@ def main(args):
                 time_data = time.time() - time_start
                 batch = [x.to(device, non_blocking=True) for x in batch]
                 net.set_input(*batch)
-                stat_loss.append(net.test())
+                stat_loss.append(net.test())  # stat_loss here is the metric to guide early-stopping
                 del batch
                 vis = net.get_vis('scalars')
                 stat_eval.append(vis['scalars'])
@@ -361,8 +362,8 @@ if __name__ == '__main__':
             help='stop training after val loss not going down for N iters')
     parser.add_argument('--reg', metavar='registration singal loss', \
             type=str, required=True, \
-            choices=['None', 'Rec', 'Mixed', 'GAN-Only'],\
-            help='[None (Reconstruction Only), Rec, Mixed, GAN-Only]')
+            choices=['None', 'Rec', 'Mixed', 'GAN-Only', 'Rec-GAN-Only', 'RRR'],\
+            help='[None (Reconstruction Only), Rec, Mixed, GAN-Only, Rec-GAN-Only, RRR]')
     #parser.add_argument('--rec', metavar='run registration', \
     #        type=str2bool, required=True, help='[True, False]')
     #parser.add_argument('--tt', type=int, nargs='*', \
@@ -386,6 +387,9 @@ if __name__ == '__main__':
             metavar='Float')
     parser.add_argument('--sim_weight', type=float, required=True, \
             help='weight for reconstruction similarity loss',
+            metavar='Float')
+    parser.add_argument('--pre_sim_weight', type=float, required=False, \
+            help='weight for pre-reconstruction similarity loss', default=0.1,
             metavar='Float')
     # mask
     parser.add_argument('--mask', metavar='type', \

@@ -40,6 +40,7 @@ def main(args):
         raise FileNotFoundError
     net.use_amp = False
     cfg = net.cfg
+    print(cfg)
 
     if args.aux_aug > 0:
         volumes = get_paired_volume_datasets( \

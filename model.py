@@ -49,7 +49,7 @@ class CSModel(BaseModel):
         # mask_lr = cfg.mask_lr
         mask = cfg.mask
         coils = self.cfg.coils
-        assert cfg.lr == 1e-4
+        # assert cfg.lr == 1e-4
         if mask in ["mask", "taylor"]:
             self.net_mask = masks[mask](shape)
         else:
@@ -68,6 +68,14 @@ class CSModel(BaseModel):
                 chans=18, \
                 pools=4, \
                 use_ref=True, \
+                )  # 如果单模态，模型输入仍为双模态，只是参考模态为零
+        self.net_R_pre = VarNet( \
+                num_cascades=4, \
+                sens_chans=8, \
+                sens_pools=4, \
+                chans=18, \
+                pools=4, \
+                use_ref=True, \
                 )
         self.optim_G = torch.optim.AdamW(self.net_G.parameters(), \
                 lr=cfg.lr, weight_decay=0)
@@ -76,6 +84,8 @@ class CSModel(BaseModel):
         self.optim_T = torch.optim.AdamW(self.net_T.parameters(), \
                 lr=cfg.lr, weight_decay=0)
         self.optim_R = torch.optim.AdamW(self.net_R.parameters(), \
+                lr=cfg.lr, weight_decay=0)
+        self.optim_R_pre = torch.optim.AdamW(self.net_R_pre.parameters(), \
                 lr=cfg.lr, weight_decay=0)
         self.optim_M = torch.optim.AdamW(self.net_mask.parameters(), \
                 lr=cfg.lr, weight_decay=0)
@@ -104,7 +114,7 @@ class CSModel(BaseModel):
         with torch.cuda.amp.autocast(enabled=self.use_amp):
             self.img_full = img_full
             if img_aux is None:
-                self.img_aux = torch.zeros_like(img_full)
+                self.img_aux = torch.zeros_like(img_full)  # 如果单模态，辅助模态置为零
             else:
                 self.img_aux = img_aux
             self.img_k_full = fft2(self.img_full)
@@ -112,13 +122,14 @@ class CSModel(BaseModel):
                 #self.img_k_sampled = self.net_mask(self.img_k_full)
                 self.img_k_sampled = self.img_k_full * (1-self.net_mask.pruned.float())
             self.img_sampled = ifft2(self.img_k_sampled)
+            self.img_pre_rec = None
             self.img_full_rss = rss(self.img_full)
             self.img_sampled_rss = rss(self.img_sampled)
             self.img_aux_rss = rss(self.img_aux)
             #mask = torch.ones(self.cfg.shape).to(self.net_mask.pruned, non_blocking=True)
             #mask.masked_scatter_(self.net_mask.pruned, torch.zeros_like(mask))
             with torch.no_grad():
-                self.img_mask = fftshift2(torch.ones_like(self.img_full_rss) - self.net_mask.pruned.float())
+                self.img_mask = fftshift2(torch.ones_like(self.img_full_rss) - self.net_mask.pruned.float())  # 用于可视化mask
 
     def forwardG(self):
         # modality translation
@@ -143,7 +154,7 @@ class CSModel(BaseModel):
         # translation
         self.img_offset, self.img_grid = self.net_T(
             moving = self.img_aux.abs(), 
-            fixed = self.img_sampled.abs()
+            fixed = self.img_sampled.abs() if self.img_pre_rec is None else self.img_pre_rec.abs()
             )
         self.img_warped = self.net_T.warp(
             self.img_aux.abs(),
@@ -155,18 +166,35 @@ class CSModel(BaseModel):
         self.loss_all += self.loss_smooth * self.cfg.weight_smooth
 
     def forwardR(self):
+        # print(self.img_warped.shape, self.img_warped.dtype)
+        # print(self.img_k_sampled.shape, self.img_k_sampled.dtype)
         self.img_rec = self.net_R(
                 masked_kspace =  self.img_k_sampled, 
                 mask = torch.logical_not(self.net_mask.pruned),
-                ref = self.img_warped,
+                ref = self.img_warped,  # ref为多线圈幅值图
                 num_low_frequencies = int(self.cfg.shape*self.cfg.sparsity*0.32),
-                )
+                )  # 输出为单线圈幅值图
+        # print(self.img_rec.shape, self.img_rec.dtype)
         # loss
         self.loss_sim = ssimloss( \
                 self.img_full_rss, self.img_rec)
         #self.loss_sim = torch.nn.functional.l1_loss( \
         #        self.img_full_rss, self.img_rec)
         self.loss_all += self.loss_sim * self.cfg.weight_sim
+
+    def forwardR_pre(self):
+        self.img_pre_rec = self.net_R_pre(
+                masked_kspace =  self.img_k_sampled,
+                mask = torch.logical_not(self.net_mask.pruned),
+                ref = torch.zeros_like(self.img_k_sampled.abs()),
+                num_low_frequencies = int(self.cfg.shape*self.cfg.sparsity*0.32),
+                )
+        # loss
+        self.loss_pre_sim = ssimloss( \
+                self.img_full_rss, self.img_pre_rec)
+        #self.loss_sim = torch.nn.functional.l1_loss( \
+        #        self.img_full_rss, self.img_rec)
+        self.loss_all += self.loss_pre_sim * self.cfg.weight_pre_sim
 
     def forwardD(self, D_loss):
         # fake = torch.cat( \
@@ -197,7 +225,7 @@ class CSModel(BaseModel):
             self.loss_all = 0
             with torch.cuda.amp.autocast(enabled=self.use_amp):
                 with torch.no_grad():
-                    self.forwardT()
+                    self.forwardT()  # 生成为零的img_wraped
                 self.loss_all = 0
                 self.forwardR()
             self.optim_R.zero_grad()
@@ -237,6 +265,32 @@ class CSModel(BaseModel):
             self.optim_D.zero_grad()
             self.scalar.scale(self.loss_all).backward()
             self.scalar.step(self.optim_D)
+        elif self.cfg.reg == 'RRR':
+            # pre-reconstruction, registration, and post-reconstruction
+            # update R_pre, T, G, D, and R
+            self.loss_all = 0
+            with torch.cuda.amp.autocast(enabled=self.use_amp):
+                self.forwardR_pre()
+                self.forwardT()
+                self.forwardG()
+                self.forwardR()
+                self.forwardD(D_loss=False)
+            self.optim_R_pre.zero_grad()
+            self.optim_T.zero_grad()
+            self.optim_G.zero_grad()
+            self.optim_R.zero_grad()
+            self.scalar.scale(self.loss_all).backward()
+            self.scalar.step(self.optim_R_pre)
+            self.scalar.step(self.optim_T)
+            self.scalar.step(self.optim_G)
+            self.scalar.step(self.optim_R)
+            # update D
+            self.loss_all = 0#torch.tensor(0, dtype=torch.float)
+            with torch.cuda.amp.autocast(enabled=self.use_amp):
+                self.forwardD(D_loss=True)
+            self.optim_D.zero_grad()
+            self.scalar.scale(self.loss_all).backward()
+            self.scalar.step(self.optim_D)
         elif self.cfg.reg == 'GAN-Only':
             # GAN-guided registration only
             # update T and G
@@ -257,6 +311,29 @@ class CSModel(BaseModel):
             self.optim_D.zero_grad()
             self.scalar.scale(self.loss_all).backward()
             self.scalar.step(self.optim_D)
+        elif self.cfg.reg == 'Rec-GAN-Only':
+            # Rec-GAN-guided registration only
+            # update R_pre, T and G
+            self.loss_all = 0
+            with torch.cuda.amp.autocast(enabled=self.use_amp):
+                self.forwardR_pre()
+                self.forwardT()
+                self.forwardG()
+                self.forwardD(D_loss=False)
+            self.optim_R_pre.zero_grad()
+            self.optim_T.zero_grad()
+            self.optim_G.zero_grad()
+            self.scalar.scale(self.loss_all).backward()
+            self.scalar.step(self.optim_R_pre)
+            self.scalar.step(self.optim_T)
+            self.scalar.step(self.optim_G)
+            # update D
+            self.loss_all = 0#torch.tensor(0, dtype=torch.float)
+            with torch.cuda.amp.autocast(enabled=self.use_amp):
+                self.forwardD(D_loss=True)
+            self.optim_D.zero_grad()
+            self.scalar.scale(self.loss_all).backward()
+            self.scalar.step(self.optim_D)
         else:
             assert False
         del self.loss_all
@@ -266,6 +343,9 @@ class CSModel(BaseModel):
         assert self.training == False
         with torch.cuda.amp.autocast(enabled=self.use_amp):
             with torch.no_grad():
+                if self.cfg.reg == 'Rec-GAN-Only' or 'RRR':
+                    self.loss_all = 0
+                    self.forwardR_pre()
                 self.loss_all = 0
                 self.forwardT()
                 self.loss_all = 0
@@ -277,7 +357,7 @@ class CSModel(BaseModel):
                 self.metric_SSIM = metrics.ssim(self.img_full_rss, self.img_rec)
                 self.metric_MAE = metrics.mae(self.img_full_rss, self.img_rec)
                 self.metric_MSE = metrics.mse(self.img_full_rss, self.img_rec)
-                if self.cfg.reg == 'GAN-Only':
+                if self.cfg.reg in ['GAN-Only', 'Rec-GAN-Only']:  # if GAN, use metric_MI to early-stop
                     returnVal = -self.metric_MI
                 else:
                     # returnVal = self.loss_all.cpu().item()
@@ -334,7 +414,7 @@ if __name__ == '__main__':
         if is_cuda: torch.cuda.synchronize()
         t2 = time.time()
         return (t2 - t1)/repeat
-    
+
     def measure_memory(n, f):
         is_cuda = next(n.parameters()).is_cuda
         if not is_cuda: return -1
@@ -360,63 +440,67 @@ if __name__ == '__main__':
     cfg.lr = 0.0001
     cfg.shape = 320
     cfg.coils = 1
-    cfg.reg = 'Mixed'
+    cfg.reg = 'Rec-GAN-Only'
     cfg.mask = 'equispaced'
     cfg.weight_smooth = 1000
     cfg.weight_gan = 0.01
     cfg.weight_gan_sim = 0.1
     cfg.weight_sim = 1
+    cfg.weight_pre_sim = 0.1
     cfg.use_amp = False
     net = CSModel(cfg)
     device = 'cuda'
-    full_img = torch.rand(1, cfg.coils, cfg.shape, cfg.shape, \
-            dtype=torch.complex64).to(device)
-    aux_img = torch.rand(1, cfg.coils, cfg.shape, cfg.shape, \
+    full_img = torch.rand(2, cfg.coils, cfg.shape, cfg.shape, \
+            dtype=torch.complex64).to(device)  # bs = 2 so that it can be chunked on bs dim
+    aux_img = torch.rand(2, cfg.coils, cfg.shape, cfg.shape, \
             dtype=torch.complex64).to(device)
     net = net.to(device)
 
-    torch.torch.set_grad_enabled(False)
+    # torch.torch.set_grad_enabled(False)
 
     # Net D
-    f = lambda x: {'x': torch.cat([rss(full_img)]*2, dim=1)}
-    n = net.net_D
-    macs, params = ptflops.get_model_complexity_info(n, (0,), \
-            as_strings=True, input_constructor=f, print_per_layer_stat=False)
-    t = measure_time(n, f)*1000
-    m = measure_memory(n, f)/1024/1024
-    print('NetD', macs+';', params+' Parameters', \
-            f'{t:.2f} ms Time;', f'{m:.2f} M Memory;')
+    # f = lambda x: {'x': torch.cat([rss(full_img)]*2, dim=1)}
+    # n = net.net_D
+    # macs, params = ptflops.get_model_complexity_info(n, (0,), \
+    #         as_strings=True, input_constructor=f, print_per_layer_stat=False)
+    # t = measure_time(n, f)*1000
+    # m = measure_memory(n, f)/1024/1024
+    # print('NetD', macs+';', params+' Parameters', \
+    #         f'{t:.2f} ms Time;', f'{m:.2f} M Memory;')
     
     # Net G
-    f = lambda x: {'x': rss(full_img)}
-    n = net.net_G
-    macs, params = ptflops.get_model_complexity_info(n, (0,), \
-            as_strings=True, input_constructor=f, print_per_layer_stat=False)
-    t = measure_time(n, f)*1000
-    m = measure_memory(n, f)/1024/1024
-    print('NetG', macs+';', params+' Parameters', \
-            f'{t:.2f} ms Time;', f'{m:.2f} M Memory;')
+    # f = lambda x: {'x': rss(full_img)}
+    # n = net.net_G
+    # macs, params = ptflops.get_model_complexity_info(n, (0,), \
+    #         as_strings=True, input_constructor=f, print_per_layer_stat=False)
+    # t = measure_time(n, f)*1000
+    # m = measure_memory(n, f)/1024/1024
+    # print('NetG', macs+';', params+' Parameters', \
+    #         f'{t:.2f} ms Time;', f'{m:.2f} M Memory;')
 
     # Net T
-    f = lambda x: {'moving': aux_img.abs(), 'fixed': full_img.abs()}
-    n = net.net_T
-    macs, params = ptflops.get_model_complexity_info(n, (0,), \
-            as_strings=True, input_constructor=f, print_per_layer_stat=False)
-    t = measure_time(n, f)*1000
-    m = measure_memory(n, f)/1024/1024
-    print('NetT', macs+';', params+' Parameters', \
-            f'{t:.2f} ms Time;', f'{m:.2f} M Memory;')
+    # f = lambda x: {'moving': aux_img.abs(), 'fixed': full_img.abs()}
+    # n = net.net_T
+    # macs, params = ptflops.get_model_complexity_info(n, (0,), \
+    #         as_strings=True, input_constructor=f, print_per_layer_stat=False)
+    # t = measure_time(n, f)*1000
+    # m = measure_memory(n, f)/1024/1024
+    # print('NetT', macs+';', params+' Parameters', \
+    #         f'{t:.2f} ms Time;', f'{m:.2f} M Memory;')
 
     # Net R
     # f = lambda x: {'masked_kspace': full_img, \
     #         'mask': torch.ones(cfg.shape).to(device) > 0.5, \
-    #         'ref': None, \
+    #         'ref': torch.zeros_like(full_img.abs()), \
     #         'num_low_frequencies': int(cfg.shape*cfg.sparsity*0.32)}
-    n = net.net_R
-    macs, params = ptflops.get_model_complexity_info(n, (0,), \
-            as_strings=True, input_constructor=f, print_per_layer_stat=False)
-    t = measure_time(n, f)*1000
-    m = measure_memory(n, f)/1024/1024
-    print('NetR', macs+';', params+' Parameters', \
-            f'{t:.2f} ms Time;', f'{m:.2f} M Memory;')
+    # n = net.net_R
+    # macs, params = ptflops.get_model_complexity_info(n, (0,), \
+    #         as_strings=True, input_constructor=f, print_per_layer_stat=False)
+    # t = measure_time(n, f)*1000
+    # m = measure_memory(n, f)/1024/1024
+    # print('NetR', macs+';', params+' Parameters', \
+    #         f'{t:.2f} ms Time;', f'{m:.2f} M Memory;')
+
+    net.set_input(img_full=full_img, img_aux=aux_img)
+    net.update()
 

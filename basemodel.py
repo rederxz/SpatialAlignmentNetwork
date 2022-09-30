@@ -178,6 +178,7 @@ class BaseModel(object):
         if objects is None:
             objects = saveable.keys()
         objects = {key: saveable[key] for key in objects}
+        print(objects.keys())
         for key, value in objects.items():
             value.load_state_dict(ckpt[key])
 

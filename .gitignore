@@ -1,3 +1,7 @@
 # vim
 *~
 __pycache__
+.idea
+LOG
+eval
+fastmri*/
