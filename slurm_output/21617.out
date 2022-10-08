@@ -1,0 +1,6 @@
+T1_8xEquispacedT2_PBSplineRRR
+Namespace(aux_aug=-1.0, crop=320, metric='/public/home/yangkd2022/libraries/SpatialAlignmentNetwork/eval/T1_8xEquispacedT2_PBSplineRRR.json', protocals=['T2', 'T1'], resume='/public/home/yangkd2022/libraries/SpatialAlignmentNetwork/LOG/T1_8xEquispacedT2_PBSplineRRR/ckpt/best.pt', save='/public/home/yangkd2022/libraries/SpatialAlignmentNetwork/eval/T1_8xEquispacedT2_PBSplineRRR', val='/public/home/yangkd2022/libraries/SpatialAlignmentNetwork/fastMRI_brain_DICOM/t1_t2_paired_6875_test.csv')
+dict_keys(['net_mask', 'net_G', 'net_D', 'net_T', 'net_R', 'net_R_pre'])
+load ckpt from: /public/home/yangkd2022/libraries/SpatialAlignmentNetwork/LOG/T1_8xEquispacedT2_PBSplineRRR/ckpt/best.pt
+class Config containing: {'sparsity': 0.125, 'lr': 0.0004, 'shape': 320, 'coils': 1, 'reg': 'RRR', 'mask': 'equispaced', 'weight_smooth': 1000.0, 'weight_gan': 0.1, 'weight_gan_sim': 1.0, 'weight_sim': 1.0, 'weight_pre_sim': 0.1, 'use_amp': False}
+{'loss_all': 0.022232308691623164, 'loss_pre_sim': 0.03884166712854423, 'loss_smooth': 2.3140729454644762e-07, 'loss_gan_sim': 0.015203941357778568, 'loss_sim': 0.022232308691623164, 'metric_MI': 0.9054070480808954, 'metric_PSNR': 39.47054127739701, 'metric_SSIM': 0.9777676614211006, 'metric_MAE': 0.005570296207260268, 'metric_MSE': 0.00012539115934986529}
