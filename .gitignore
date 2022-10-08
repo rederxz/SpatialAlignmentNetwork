@@ -5,3 +5,4 @@ __pycache__
 LOG
 eval
 fastmri*/
+slurm_output
